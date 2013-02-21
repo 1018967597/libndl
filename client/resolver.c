@@ -1,0 +1,37 @@
+/* resolver.c -- this file is a example.
+  
+   Copyright (C) 2012 2013 meng shi.
+    
+   This program is free software: you can redistribute it and/or modify
+   it under the terms of the GNU General Public License as published by
+   the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
+
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU General Public License for more details.
+
+   You should have received a copy of the GNU General Public License
+   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+
+#include <stdio.h>
+#include "ndl.h"
+
+int
+main ()
+{
+  ndl_state test_nds;
+  //type_values test_type;
+  ndl_query test_nqs;
+  static const char *test_name = "www.baidu.com";
+  
+  //test_owner = "www.baidu.com";
+  //printf ("test_owner is: %s\n", test_owner);  
+  dns_init(&test_nds, 0);
+  
+  dns_submit(test_nds, &test_nqs, test_name, 1, 0);
+  //dns_dump();  
+  //dns_end();
+  return 0;
+}
