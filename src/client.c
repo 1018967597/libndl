@@ -1,4 +1,4 @@
-/* client.c -- simple test program, not part of the library.
+/* client.c -- simple dome program, not part of the library.
  
    Copyright (C) 2012 2013 S.meng.
  
