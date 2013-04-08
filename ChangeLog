@@ -1,0 +1,11 @@
+`Apr 02 13:10:26 2013  S.meng  <mengshi19860812@gmail.com>
+
+	* doc.texi (/ndl-0.0.1): program documentation. 
+
+
+`Mar 02 11:22:07 2013  S.meng  <mengshi19860812@gmail.com>
+
+	* Client (/src): This ia a demo program.
+	* Makefile (/src): Autometically compile files. 
+
+Copyright 2012 2013 S.meng.
