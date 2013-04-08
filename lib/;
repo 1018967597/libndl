@@ -1,0 +1,810 @@
+/* messages.c -- this file is core.
+  
+   Copyright (C) 2012 2013 S.meng.
+    
+   This program is free software: you can redistribute it and/or modify
+   it under the terms of the GNU General Public License as published by
+   the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
+
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU General Public License for more details.
+
+   You should have received a copy of the GNU General Public License
+   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+
+#include <stdlib.h>
+#include <string.h>
+
+#include <sys/uio.h>
+#include <unistd.h>
+#include <errno.h>
+#include <sys/time.h>
+
+#include "internal.h"
+
+int 
+*classof (class_values cv)
+{
+  if (cv == 1)
+    {
+      return "IN";
+    }
+  else if (cv == 2)
+    {
+      return "CS";
+    }
+  else if (cv == 3)
+    {
+      return "CH";
+    }
+  else if (cv == 4)
+    {
+      return "HS"; 
+    }
+  else
+    {
+      return "ERROR";
+    }
+/*
+  switch (cv)
+    {
+      case 1: return 'IN';
+      break;
+      case 2: return 'CS';
+      break;
+      case 3: return 'CH';
+      break;
+      case 4: return 'HS';
+      break;
+      default: return 0; 
+    }
+*/
+}
+
+static ndl_si 
+make_header (ndl_sd nsd, 
+             cache *cc, 
+             int *id_r, 
+             int qdlen) 
+{
+  int id;
+  byte *set;
+  
+  if (!cache_intend (cc, DNS_HEADER_SIZE + qdlen + 4)) 
+    return WITHOUT_MEMORY;
+
+  cc->used = 0;
+  INIT_SET (cc);
+  
+  *id_r = id = (nsd->next_id++) & 0x0ffff;
+  WORD_SET (id);
+  BYTE_SET (0x01); 
+  BYTE_SET (0x00); 
+  WORD_SET (1);
+  WORD_SET (0); 
+  WORD_SET (0); 
+  WORD_SET (0); 
+  
+  FINISH_SET (cc);
+  
+  return DNS_OK;
+}
+
+ndl_si
+make_owner (cache *cc,
+            const char *owner,
+            int ol)
+{
+  int ll, c, cls;
+  byte label[NAMES], *set;
+  const char *p, *q;
+
+  
+  INIT_SET (cc);
+
+  p = owner; 
+  q = owner+ol;
+  cls= 0;
+
+  while (p != q) 
+    {
+      ll = 0;
+      while (p != q && (c= *p++)!='.') 
+        {
+          if (ll == sizeof(label)) 
+            return QUERY_NAME_INVALID;
+
+          label[ll++]= c;
+        }
+
+      if (!ll) 
+        return QUERY_NAME_INVALID;
+
+      if (cls++ > LABELS) 
+        return QUERY_NAME_TOO_LONG;
+
+      BYTE_SET (ll);
+      memcpy(set, label, ll); 
+      set += ll;
+    }
+
+  BYTE_SET (0);
+
+  FINISH_SET (cc);
+  
+  return DNS_OK;
+}
+
+static ndl_si
+make_question (cache *cc,
+               const char *owner,
+               int ol,
+               class_values class,
+               type_values type)
+{
+  ndl_si nsi;
+  byte *set;
+ 
+  nsi = make_owner (cc, owner, ol);
+  if (nsi)
+    return nsi;
+  
+  INIT_SET (cc);
+
+  WORD_SET (type & 0x0ffff); 
+  WORD_SET (class); 
+
+  FINISH_SET (cc);
+  assert(cc->used <= cc->vacant);
+  
+  return DNS_OK;
+}
+
+ndl_si 
+make_query (ndl_sd nsd,
+            cache *cc,
+            int *id_r,
+            const char *owner,
+            int ol,
+            query_sd qsd,
+            const type_sd *tsd)
+{
+  ndl_si nsi;
+ 
+  nsi = make_header (nsd, cc, id_r, strlen (owner) + 2);
+  if (nsi)
+    return nsi;
+   
+  nsi = make_question (cc, owner, ol, qsd->class, tsd->type);
+  if (nsi)
+    return nsi;
+  
+  return DNS_OK;
+}
+
+void 
+udp_messages (query_sd qsd, 
+              tv stamp_t) 
+{
+  struct sockaddr_in servaddr;
+  int server, r;
+  ndl_sd nsd;
+
+  assert(qsd->state == udp);
+  if (qsd->udp_server.retries >= UDP_MAX_RETRIES) 
+    {
+      query_fail (qsd,TIMEOUT);
+      return;
+    }
+
+  server = qsd->udp_server.next;
+  memset(&servaddr, 0, sizeof(servaddr));
+
+  nsd = qsd->nsd;
+  servaddr.sin_family = AF_INET;
+  servaddr.sin_addr = nsd->servers[server].addr;
+  servaddr.sin_port = htons (SERVER_PORT);
+  
+  r = sendto (nsd->protoc.udp, qsd->query_dgram, 
+              qsd->query_dglen, 0, &servaddr, sizeof(servaddr));
+
+  if (r < 0) 
+    printw (nsd, server, 0, "sendto failed: %s", strerror (errno));
+  
+  set_timeout (&stamp_t, UDP_PERTRY_MS);
+  qsd->timeout = stamp_t;
+  qsd->sent_udp |= (1 << server);
+  qsd->udp_server.next = (server + 1) % nsd->nservers;
+  qsd->udp_server.retries++;
+  LIST_SET_UP (nsd->list, qsd);
+}
+
+static query_sd 
+query_state_load (ndl_sd nsd, 
+                  const type_sd *tsd,
+                  class_values cv, 
+                  tv stamp_t) 
+{
+  query_sd qsd;
+  
+  qsd = malloc(sizeof(*qsd));  
+  if (!qsd) 
+    return 0;
+
+  qsd->asd = malloc(sizeof(*qsd->asd));  
+  if (!qsd->asd) 
+    { 
+      free(qsd); 
+      return 0; 
+    }
+  
+  qsd->nsd = nsd;
+  qsd->nsd->class = classof (cv);
+  qsd->state = udp;
+  qsd->prev = qsd->next = qsd->parent= 0;
+  INIT_LIST (qsd->children);
+  INIT_LINK (qsd->siblings);
+  INIT_LIST (qsd->allocations);
+  qsd->class = cv;
+  qsd->allocd = 0;
+
+  qsd->tsd = tsd;
+  INIT_CACHE (&qsd->cc); 
+  qsd->query_dgram = qsd->cname_dgram = 0;
+  qsd->query_dglen = qsd->cname_dglen = 0;
+  qsd->cname_begin = 0;
+
+  qsd->id = 0;
+  qsd->udp_server.retries = 0;
+  qsd->udp_server.next = 0;
+  qsd->sent_udp = 0;
+  timerclear (&qsd->timeout);
+  qsd->limits = stamp_t.tv_sec + MAX_TTL;
+
+  qsd->asd->nsi = DNS_OK;
+  qsd->asd->cname = qsd->asd->owner= 0;
+  qsd->asd->type = tsd->type;
+  qsd->asd->limits = -1;
+  qsd->asd->nrrs = 0;
+  qsd->asd->rrs.untyped = 0;
+  qsd->asd->rr_size = tsd->rr_size;
+
+  return qsd;
+}
+
+static void 
+send_query (ndl_sd nsd, 
+            query_sd qsd,
+            const type_sd *tsd, 
+            cache *qsdmsg_cc, 
+            int id,
+	    tv stamp_t) 
+{
+  qsd->cc= *qsdmsg_cc;
+  INIT_CACHE (qsdmsg_cc);
+
+  qsd->query_dgram = malloc (qsd->cc.used);
+
+  if (!qsd->query_dgram) 
+    { 
+      query_fail (qsd, WITHOUT_MEMORY); 
+      return; 
+    }
+  
+  qsd->id = id;
+  qsd->query_dglen = qsd->cc.used;
+  memcpy (qsd->query_dgram, qsd->cc.buf, qsd->cc.used);
+  
+  udp_messages (qsd, stamp_t);
+  dnsmsg (nsd, -1, 0, 0, 0);
+}
+
+static void 
+create_query (ndl_sd nsd, query_sd qsd,
+	      const char *owner, 
+              int ol,
+	      const type_sd *tsd, 
+              class_values class,
+	      tv stamp_t) 
+{
+  cache cc;
+  int id;
+  ndl_si nsi;
+
+  INIT_CACHE (&cc);
+  
+  nsi = make_query (nsd, &cc, &id, owner, ol, qsd, tsd);
+  if (nsi) 
+    { 
+      query_fail (qsd,nsi); 
+      return; 
+    }
+
+  send_query (nsd, qsd, tsd, &cc, id, stamp_t);
+}
+
+int dnstransf (ndl_sd nsd,
+	       const char *owner,
+	       type_values type,
+               class_values class,
+	       query_sd *query_r) 
+{
+  int r, ol;
+  ndl_si nsi;
+  const type_sd *tsd;
+  struct timeval stamp_t;
+  query_sd qsd;
+
+  tsd = get_type (type);
+  if (!tsd) 
+    return UNKNOWN_RR_TYPE;
+
+  r = gettimeofday(&stamp_t, 0); 
+  if (r) 
+    goto j_errno;
+
+  qsd = query_state_load (nsd, tsd, class, stamp_t); 
+  if (!qsd) 
+    goto j_errno;
+  
+  *query_r = qsd;
+
+  ol = strlen (owner);
+  if (!ol)
+    { 
+      nsi = QUERY_NAME_INVALID; 
+      goto j_failure; 
+    } 
+
+  if (ol > NAMES + 1) 
+    { 
+      nsi = QUERY_NAME_TOO_LONG; 
+      goto j_failure; 
+    } 
+
+  create_query (nsd, qsd, owner,ol, tsd, qsd->class, stamp_t);
+  return 0;
+
+ j_failure:
+  query_fail (qsd, nsi);
+  return 0;
+
+ j_errno:
+  r = errno;
+  assert(r);
+  return r;
+}
+
+static void *
+genalloc (query_sd qsd, 
+          size_t sz) 
+{
+  allocnode *an;
+
+  if (!sz) 
+    return qsd; 
+
+  an = malloc (ARRANGE (ARRANGE (sizeof (*an)) + sz));
+  if (!an) 
+    return 0;
+
+  LIST_SET_UP (qsd->allocations, an);
+
+  return (byte*)an + ARRANGE (sizeof (*an));
+}
+
+void *
+genload (query_sd qsd, 
+         size_t sz) 
+{
+  sz = ARRANGE (sz);
+  qsd->allocd += sz;
+  return genalloc (qsd, sz);
+}
+
+static void 
+remove_children (query_sd qsd) 
+{
+  query_sd cqsd, ncqsd;
+
+  for (cqsd = qsd->children.head; cqsd; cqsd= ncqsd) 
+    {
+      ncqsd = cqsd->siblings.next;
+      dnsquit (cqsd);
+    }
+
+ INIT_LIST (qsd->children);
+}
+
+void 
+reset_cname (query_sd qsd) 
+{
+  remove_children (qsd);
+  qsd->asd->nrrs = 0;
+  qsd->asd->rrs.untyped = 0;
+  qsd->allocd = qsd->asd->cname 
+                      ? ARRANGE (strlen (qsd->asd->cname) + 1) 
+                      : 0;
+}
+
+static void 
+free_query_sd (query_sd qsd) 
+{
+  allocnode *an, *ann;
+
+  remove_children (qsd);
+  for (an = qsd->allocations.head; an; an = ann) 
+    { 
+      ann = an->next;
+      free(an); 
+    } 
+
+  free_cache (&qsd->cc);
+}
+
+void 
+dnsquit (query_sd qsd) 
+{
+  switch (qsd->state) 
+    {
+      case udp: 
+        LIST_FREE (qsd->nsd->list,qsd);
+        break;
+      case child:
+        LIST_FREE (qsd->nsd->child_list,qsd);
+        break;
+      case done:
+        LIST_FREE (qsd->nsd->output_list,qsd);
+        break;
+      default:
+        abort();
+    }
+
+  free_query_sd(qsd);
+  free(qsd->asd);
+  free(qsd);
+}
+
+void 
+update_limits (query_sd qsd, 
+               unsigned long ttl, 
+               tv stamp_t) 
+{
+  time_t max;
+
+  assert (ttl <= MAX_TTL);
+  max = stamp_t.tv_sec + ttl;
+  if (qsd->limits < max) 
+    return;
+
+  qsd->limits = max;
+}
+
+void 
+query_done (query_sd qsd) 
+{
+  answer_sd *asd_i;
+  query_sd parent;
+
+  qsd->id = -1;
+  asd_i = qsd->asd;
+
+  if (asd_i->nrrs && qsd->tsd->diff_needswap) 
+    {
+      if (!cache_intend (&qsd->cc, qsd->tsd->rr_size)) 
+        {
+          query_fail (qsd, WITHOUT_MEMORY);
+          return;
+        }
+    }
+
+  asd_i->limits = qsd->limits;
+  parent = qsd->parent;
+  if (parent) 
+    {
+      LIST_FREE_MORE (parent->children, qsd, siblings.);
+      free_query_sd (qsd);
+      free (qsd);
+    } 
+  else 
+    {
+      LIST_SET_UP (qsd->nsd->output_list, qsd);
+    }
+}
+
+void 
+query_fail (query_sd qsd, 
+            ndl_si nsi) 
+{
+  reset_cname (qsd);
+  qsd->asd->nsi = nsi;
+  query_done (qsd);
+}
+
+void 
+procmsg (ndl_sd nsd, 
+         const byte *dgram, 
+         int dglen,
+         int server, tv stamp_t) 
+{
+  int count_byte, rrstart, intend_rrs, rri;
+  int id, qoatrr, zr, qdcount, ancount, nscount, arcount;
+  int qr, opcode, tc, rd, ra;
+  int rr_type, rr_class, rdlength, rd_start;
+  int an_start, ns_start, ar_start;
+  int owner_matched, l, nrrs;
+  unsigned long ttl;
+  const type_sd *tsd;
+  query_sd qsd, nqsd;
+  dns_rcode rcode;
+  ndl_si nsi;
+  cache tmpcc;
+  byte *rdata;
+  parsemsg pm;
+  
+  if (dglen < DNS_HEADER_SIZE) 
+    {
+      printd (nsd, server, 0, "received datagram too short for message header (%d)", dglen);
+      return;
+    }
+
+  count_byte = 0;
+
+  WORD_GET (count_byte, id);
+
+  BYTE_GET (count_byte, qoatrr);
+  BYTE_GET (count_byte, zr);
+
+  WORD_GET (count_byte, qdcount);
+  WORD_GET (count_byte, ancount);
+  WORD_GET (count_byte, nscount);
+  WORD_GET (count_byte, arcount);
+
+  assert(count_byte == DNS_HEADER_SIZE);
+
+  qr = qoatrr & 0x80;
+  opcode = (qoatrr & 0x78) >> 3;
+  tc = qoatrr & 0x02;
+  rd = qoatrr & 0x01;
+  ra = zr & 0x80;
+  rcode = (zr & 0x0f);
+  
+  if (!qr) 
+    {
+      printd (nsd, server, 0, "server sent us a query, not a response");
+      return;
+    }
+
+  if (opcode) 
+    {
+      printd (nsd, server, 0, "server sent us unkstamp_tn opcode %d (wanted 0=QUERY)", opcode);
+      return;
+    }
+
+  if (!qdcount) 
+    {
+      printd (nsd, server, 0, "server sent reply without qsdoting our qsdestion");
+      return;
+    } 
+  else if (qdcount > 1) 
+    {
+      printd (nsd, server, 0, "server claimed to asd %d qsdestions with one message", qdcount);
+      return;
+    }
+
+  for (qsd = nsd->list.head; qsd; qsd = nqsd) 
+    {
+      nqsd = qsd->next;
+      if (qsd->id != id) 
+        continue;
+
+      if (dglen < qsd->query_dglen) 
+        continue;
+
+      if (memcmp (qsd->query_dgram+DNS_HEADER_SIZE,
+	          dgram+DNS_HEADER_SIZE,
+	          qsd->query_dglen-DNS_HEADER_SIZE))
+        continue;
+
+      break;
+    }
+
+  if (!qsd) 
+    {
+      INIT_CACHE (&tmpcc);
+      printb (nsd, server, 0, "reply not found, id %02x, query owner %s",
+	      id, dename (nsd, server, 0, &tmpcc, dgram, dglen, DNS_HEADER_SIZE));
+
+      free_cache (&tmpcc);
+      return;
+    }
+
+  an_start = qsd->query_dglen;
+  ar_start = -1;
+
+  LIST_FREE (nsd->list, qsd);
+   
+  switch (rcode) 
+    {
+      case NO_ERROR:
+      case NAME_ERROR:
+        break;
+      case FORMAT_ERROR:
+        printw (nsd, server, qsd, "server cannot understand our query (Format Error)");
+        query_fail (qsd, R_FORMAT_ERROR);
+        return;
+      case SERV_FAILURE:
+        query_fail (qsd, R_SERV_FAILURE);
+        return;
+      case NOT_IMPLEMENTED:
+        printw (nsd, server, qsd, "server claims not to implement our query");
+        query_fail (qsd, R_NOT_IMPLEMENTED);
+        return;
+      case REFUSED:
+        printw (nsd, server, qsd, "server refused our query");
+        query_fail (qsd, R_REFUSED);
+        return;
+      default:
+        printw (nsd, server, qsd, "server gave unkstamp_tn response code %d", rcode);
+        query_fail (qsd, RCODE_UNKNOWN);
+        return;
+    }
+
+  intend_rrs = 0;
+  count_byte = an_start;
+  for (rri= 0; rri < ancount; rri++) 
+    {
+      rrstart = count_byte;
+      nsi = get_rr (qsd,server, dgram,dglen,&count_byte,
+		     &rr_type,&rr_class,&ttl, &rdlength,&rd_start,
+		     &owner_matched);
+      if (nsi) 
+        { 
+          query_fail (qsd, nsi); 
+          return; 
+        }
+
+      if (rr_type == -1) 
+        goto j_truncated;
+
+      if (rr_class != qsd->class) 
+        {
+          printd (nsd, server, qsd, "ignoring asd RR with wrong class %d (expected IN=%d)",
+		 rr_class, qsd->class);
+          continue;
+        }
+
+      if (!owner_matched) 
+        {
+	      printb (nsd, server, qsd, "ignoring RR with an unexpected owner %s",
+		      dename (nsd, server, qsd, &qsd->cc, dgram, dglen, rrstart));
+          continue;
+        }
+
+      if (rr_type == CNAME) 
+        {
+          if (!qsd->cname_dgram) 
+            { 
+	      qsd->cname_begin = rd_start;
+	      qsd->cname_dglen = dglen;
+	      nsi = get_name (nsd, server, qsd, &qsd->cc,
+			      dgram, dglen, &rd_start, rd_start + rdlength);
+
+	      if (!qsd->cc.used) 
+                goto j_truncated;
+
+	      if (nsi) 
+                { 
+                  query_fail(qsd,nsi); 
+                  return; 
+                }
+
+	      l = strlen (qsd->cc.buf) + 1;
+	      qsd->asd->cname = genload (qsd, l);
+	      if (!qsd->asd->cname) 
+                { 
+                  query_fail(qsd, WITHOUT_MEMORY); 
+                  return; 
+                }
+
+	      qsd->cname_dgram = genalloc (qsd, ARRANGE (dglen));
+	      memcpy(qsd->cname_dgram, dgram, dglen);
+
+	      memcpy(qsd->asd->cname, qsd->cc.buf, l);
+	      update_limits (qsd, ttl, stamp_t);
+	    } 
+          else 
+            {
+	      printb (nsd, server, qsd, "ignoring duplicate CNAME (%s, as well as %s)",
+		      dename (nsd, server, qsd, &qsd->cc, dgram, dglen, rd_start),
+		      qsd->asd->cname);
+            }
+        } 
+      else if (rr_type == (qsd->tsd->type & 0x0ffff)) 
+        {
+          intend_rrs++;
+        } 
+      else 
+        {
+          printb (nsd, server, qsd, "ignoring asd RR with irrelevant type %d", rr_type);
+        }
+    }
+
+  if (tc) 
+    goto j_truncated;
+
+  ns_start= count_byte;
+
+  qsd->asd->rrs.untyped = genload (qsd, qsd->tsd->rr_size*intend_rrs);
+  if (!qsd->asd->rrs.untyped) 
+    { 
+      query_fail (qsd, WITHOUT_MEMORY); 
+      return; 
+    }
+
+  tsd = qsd->tsd;
+  count_byte = an_start;
+  rdata = qsd->asd->rrs.bytes;
+
+  pm.nsd = qsd->nsd;
+  pm.qsd = qsd;
+  pm.server = server;
+  pm.dgram = dgram;
+  pm.dglen = dglen;
+  pm.ns_start = ns_start;
+  pm.nscount = nscount;
+  pm.arcount = arcount;
+  pm.stamp_t = stamp_t;
+
+  for (rri = 0, nrrs = 0; rri < ancount; rri++) 
+    {
+      nsi = get_rr (qsd,server, dgram, dglen, &count_byte,
+		    &rr_type, &rr_class, &ttl, &rdlength, &rd_start,
+		    &owner_matched);
+      assert(!nsi); 
+      assert(rr_type != -1);
+
+      if (rr_class != qsd->class ||
+	  rr_type != (qsd->tsd->type & 0x0ffff) ||
+	  !owner_matched)
+        continue;
+
+      update_limits (qsd, ttl, stamp_t);
+
+      nsi = tsd->parse (&pm, rd_start, rd_start + rdlength, rdata+nrrs*tsd->rr_size);
+      if (nsi) 
+        { 
+          query_fail (qsd, nsi); 
+          return; 
+        }
+
+      if (rd_start == -1) 
+        goto j_truncated;
+
+      nrrs++;
+    }
+  assert (nrrs == intend_rrs);
+  qsd->asd->nrrs = nrrs;
+
+  if (qsd->children.head) 
+    {
+      qsd->state = child;
+      LIST_SET_UP (nsd->child_list,qsd);
+      return;
+    }
+
+  query_done (qsd);
+  return;
+
+ j_truncated:
+  
+  if (!tc) 
+    {
+      printd (nsd, server, qsd, "server sent datagram which points outside itself");
+      query_fail (qsd, INVALID_RESPONSE);
+      return;
+    }
+}

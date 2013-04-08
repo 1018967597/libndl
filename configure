@@ -1,0 +1,83 @@
+#!/bin/bash
+#  Makefile -- make ndl source file.
+#  
+#  Copyright (C) 2012 2013 S.meng.
+#    
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+
+
+# Content missing not output to config.mk.
+cat /dev/null > config.mk
+
+# Environmental configure.
+echo "# Automatically generated." >> config.mk 
+echo "NDL_NAME = ndl" >> config.mk
+echo "NDL_VERS = 0.0.1" >> config.mk
+echo "NDL_DOC = doc" >> config.mk
+echo "NDL_MAN = man" >> config.mk
+
+echo "CFLAGS = -Wall -W -Wmissing-prototypes -O2" >> config.mk
+echo "D:=-" >> config.mk
+
+# Command testing.
+function tests () 
+{
+  command -v $f 2> /dev/null > /dev/null;
+}
+
+if 
+  tests make; 
+then
+  echo "MAKE=make" >> config.mk
+  export MAKE=make
+else
+  echo "MAKE=gmake" >> config.mk
+  export MAKE=gmake
+fi
+
+if 
+  tests cc; 
+then
+  echo "CC=cc" >> config.mk
+  export CC=cc
+else
+  echo "CC=gcc" >> config.mk
+  export CC=gcc
+
+fi
+
+if 
+  tests rm; 
+then
+  echo "RM=-rm -f" >> config.mk
+fi
+
+if 
+  tests makeinfo; 
+then
+  echo "MAKEINFO=makeinfo" >> config.mk
+fi
+
+if 
+  tests groff; 
+then
+  echo "GROFF=groff" >> config.mk
+fi
+
+# Make library file.
+(cd lib; make)
+(make)
+(mv src/client .) 
+
+
