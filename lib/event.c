@@ -25,52 +25,52 @@
 #include "inside.h"
 
 static void 
-inter_maxto (tv **tv_io, 
-             tv *tvbuf,
-	     tv maxto) 
+time_max (tv **tv_io, 
+          tv *tv_buf,
+          tv max) 
 {
-  tv *rbuf;
+  tv *buf_r;
 
   if (!tv_io) 
     return;
 
-  rbuf = *tv_io;
+  buf_r = *tv_io;
 
-  if (!rbuf) 
+  if (!buf_r) 
     {
-      *tvbuf = maxto; 
-      *tv_io = tvbuf;
+      *tv_buf = max; 
+      *tv_io = tv_buf;
     } 
   else 
     {
-      if (timercmp (rbuf, &maxto, >)) 
-        *rbuf = maxto;
+      if (timercmp (buf_r, &max, >)) 
+        *buf_r = max;
     }
 }
 
 static void 
-inter_maxtoabs (tv **tv_io, 
-                tv *tvbuf,
-	        tv stamp_t, 
-                tv maxtime) 
+time_abs_max (tv **tv_io, 
+              tv *tv_buf,
+              tv stamp_t, 
+              tv max_time) 
 {
   ldiv_t dr;
 
   if (!tv_io) 
     return;
 
-  maxtime.tv_sec -= (stamp_t.tv_sec + 2);
-  maxtime.tv_usec -= (stamp_t.tv_usec - 2000000);
+  max_time.tv_sec -= (stamp_t.tv_sec + 2);
+  max_time.tv_usec -= (stamp_t.tv_usec - 2000000);
 
-  dr = ldiv (maxtime.tv_usec, 1000000);
+  dr = ldiv (max_time.tv_usec, 1000000);
 
-  maxtime.tv_sec += dr.quot;
-  maxtime.tv_usec -= dr.quot * 1000000;
+  max_time.tv_sec += dr.quot;
+  max_time.tv_usec -= dr.quot * 1000000;
 
-  if (maxtime.tv_sec < 0) 
-    timerclear (&maxtime);
+  if (max_time.tv_sec < 0) 
+    timerclear (&max_time);
 
-  inter_maxto (tv_io, tvbuf, maxtime);
+  time_max (tv_io, tv_buf, max_time);
 }
 
 static void 
@@ -91,7 +91,7 @@ static void
 timeout_check (ndl_sd nsd, 
                tv stamp_t,
 	       tv **tv_io, 
-               tv *tvbuf) 
+               tv *tv_buf) 
 {
   query_sd qsd, nqsd;
   
@@ -112,7 +112,7 @@ timeout_check (ndl_sd nsd,
         } 
       else 
         {
-          inter_maxtoabs (tv_io, tvbuf, stamp_t, qsd->timeout);
+          time_abs_max (tv_io, tv_buf, stamp_t, qsd->timeout);
         }
     }
 }  
@@ -124,7 +124,7 @@ likefd (ndl_sd nsd,
         fd_set *write_fds, 
         fd_set *except_fds,
         tv **tv_io, 
-        tv *tvbuf) 
+        tv *tv_buf) 
 {
   tv stamp_t;
   tv tvto_lr;
@@ -137,11 +137,11 @@ likefd (ndl_sd nsd,
 	      strerror (errno));
       timerclear (&tvto_lr); 
       set_timeout (&tvto_lr, LOCAL_RESOURCE_MS);
-      inter_maxto (tv_io, tvbuf, tvto_lr);
+      time_max (tv_io, tv_buf, tvto_lr);
     } 
   else 
     {
-      timeout_check (nsd, stamp_t, tv_io, tvbuf);
+      timeout_check (nsd, stamp_t, tv_io, tv_buf);
     }
   
   io_fd_set (max_fd, read_fds, nsd->protoc.udp);
